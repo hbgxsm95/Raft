@@ -300,7 +300,8 @@ func (rf *Raft) startElection(){
 	}
 	rf.mu.Unlock()
 	VoteCount := 0
-	for peerIndex := 0; peerIndex < len(rf.peers); peerIndex = peerIndex + 1{
+
+	for peerIndex := range rf.peers{
 		if peerIndex != rf.me{
 			reply := &RequestVoteReply{}
 			args.Term = rf.CurrentTerm
@@ -330,7 +331,7 @@ func (rf *Raft) LeaderRoutine(){
 func (rf *Raft) sendHeartBeat(){
 	args := &AppendEntriesArgs{}
 	reply := &AppendEntriesReply{}
-	for peerIndex := 0; peerIndex < len(rf.peers); peerIndex = peerIndex + 1{
+	for peerIndex := range rf.peers {
 		if peerIndex != rf.me{
 			rf.sendAppendEntries(peerIndex, args, reply)
 		}
