@@ -18,7 +18,11 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"labrpc"
+	"time"
+	"math/rand"
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -31,6 +35,12 @@ type ApplyMsg struct {
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
+
+var (
+	ElectionTimeOut  = time.Duration(200)
+	HeartBeatTimeOut    = time.Duration(160)
+	ElectionDuration = 200
+)
 
 const (
 	Follower = iota
@@ -57,6 +67,9 @@ type Raft struct {
 	NextIndex []int
 	MatchIndex []int
 	State int
+
+	// For the Follower
+	ReceivedHB chan int
 
 }
 
@@ -93,6 +106,40 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	Term int
+	LeaderId int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries[] int
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.CurrentTerm
+	if (rf.CurrentTerm > args.Term){
+		reply.Success = false
+		return
+	}
+	if rf.State == Follower {
+		rf.ReceivedHB <- 1
+	} else if rf.State == Candidate{
+		rf.State = Follower
+	}
+	if (args.Term > rf.CurrentTerm){
+		rf.CurrentTerm = args.Term
+		rf.State = Follower
+	} else{
+		rf.Log = append(rf.Log, args.Entries...)
+	}
+}
 //
 // example RequestVote RPC handler.
 //
@@ -100,6 +147,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.State == Follower {
+		rf.ReceivedHB <- 1
+	}
 	if args.Term < rf.CurrentTerm{
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
@@ -160,6 +210,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -196,23 +251,90 @@ func (rf *Raft) Kill() {
 func (rf *Raft) MainRoutine(){
 	for{
 		rf.mu.Lock()
-		switch rf.State {
+		currentState := rf.State
+		rf.mu.Unlock()
+		switch currentState {
 		case Follower:
 			rf.FollowerRoutine()
+		case Candidate:
+			rf.CandidateRoutine()
+		case Leader:
+			rf.LeaderRoutine()
 		}
 	}
 }
 
 func (rf *Raft) FollowerRoutine(){
+	var heartBeatTimeoutRand = HeartBeatTimeOut + time.Duration(rand.Intn(ElectionDuration))
+	select {
+	case <- time.After(heartBeatTimeoutRand):
+		rf.ConversionToCandidate()
+	case <- rf.ReceivedHB:
+	}
+}
 
+func (rf *Raft) ConversionToCandidate(){
+	rf.mu.Lock();
+	defer rf.mu.Unlock()
+	rf.State = Candidate
 }
 
 func (rf *Raft) CandidateRoutine(){
+	go rf.startElection()
+	var electionTimeoutRand = ElectionTimeOut + time.Duration(rand.Intn(ElectionDuration))
+	select {
+	case <- time.After(electionTimeoutRand):
+	}
+}
+
+func (rf *Raft) startElection(){
+	rf.mu.Lock()
+	rf.CurrentTerm = rf.CurrentTerm + 1
+	rf.VoteFor = rf.me
+	args := &RequestVoteArgs{}
+	args.Term = rf.CurrentTerm
+	args.LastLogIndex = len(rf.Log)
+	args.CandidateID = rf.me
+	if len(rf.Log) != 0{
+		args.LastLogTerm = rf.Log[len(rf.Log) - 1]
+	}
+	rf.mu.Unlock()
+	VoteCount := 0
+	for peerIndex := 0; peerIndex < len(rf.peers); peerIndex = peerIndex + 1{
+		if peerIndex != rf.me{
+			reply := &RequestVoteReply{}
+			args.Term = rf.CurrentTerm
+			ok := rf.sendRequestVote(peerIndex, args, reply)
+			if ok == true{
+				VoteCount = VoteCount + 1
+			}
+		}
+	}
+	// Received from majority of servers
+	if VoteCount > (len(rf.peers) - 1) / 2{
+		rf.mu.Lock()
+		rf.State = Leader
+		rf.mu.Unlock()
+	}
 
 }
 
 func (rf *Raft) LeaderRoutine(){
-	
+	var heartBeatTimeoutRand = HeartBeatTimeOut + time.Duration(rand.Intn(ElectionDuration))
+	select {
+	case <- time.After(heartBeatTimeoutRand):
+		go rf.sendHeartBeat()
+	}
+}
+
+func (rf *Raft) sendHeartBeat(){
+	args := &AppendEntriesArgs{}
+	reply := &AppendEntriesReply{}
+	for peerIndex := 0; peerIndex < len(rf.peers); peerIndex = peerIndex + 1{
+		if peerIndex != rf.me{
+			rf.sendAppendEntries(peerIndex, args, reply)
+		}
+	}
 }
 //
 // the service or tester wants to create a Raft server. the ports
@@ -230,5 +352,7 @@ func Make(peers []*labrpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 	rf.CommitIndex = 0
 	rf.LastApplied = 0
 	rf.State = Follower
+	rf.ReceivedHB = make(chan int)
+	go rf.MainRoutine()
 	return rf
 }
