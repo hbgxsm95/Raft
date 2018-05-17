@@ -32,6 +32,12 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+const (
+	Follower = iota
+	Candidate
+	Leader
+
+)
 //
 // A Go object implementing a single Raft peer.
 //
@@ -40,9 +46,17 @@ type Raft struct {
 	peers []*labrpc.ClientEnd // RPC end points of all peers
 	me    int                 // this peer's index into peers[]
 
-	// Your data here (3A, 3B).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	CurrentTerm int
+	VoteFor int
+	// Remember that the index starts with 1
+	Log []int
+
+	CommitIndex int
+	LastApplied int
+
+	NextIndex []int
+	MatchIndex []int
+	State int
 
 }
 
@@ -52,7 +66,10 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
-	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.CurrentTerm
+	isleader = rf.State == Leader
 	return term, isleader
 }
 
@@ -61,6 +78,10 @@ func (rf *Raft) GetState() (int, bool) {
 //
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	Term int
+	CandidateID int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 //
@@ -68,7 +89,8 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (3A).
+	Term int
+	VoteGranted bool
 }
 
 //
@@ -76,6 +98,32 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.CurrentTerm{
+		reply.Term = rf.CurrentTerm
+		reply.VoteGranted = false
+		return
+	} else if args.Term > rf.CurrentTerm{
+		rf.State = Follower
+		rf.CurrentTerm = args.Term
+	}
+	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateID{
+		if args.LastLogTerm > rf.Log[len(rf.Log) - 1]{
+			reply.Term = rf.Log[len(rf.Log) - 1]
+			reply.VoteGranted = true
+			return
+		} else if args.LastLogTerm == rf.Log[len(rf.Log) - 1]{
+			if args.LastLogIndex >= len(rf.Log){
+				reply.Term = rf.Log[len(rf.Log) - 1]
+				reply.VoteGranted = true
+				return
+			}
+		}
+	}
+	reply.Term = rf.CurrentTerm
+	reply.VoteGranted = false
+	return
 }
 
 //
@@ -145,6 +193,27 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) MainRoutine(){
+	for{
+		rf.mu.Lock()
+		switch rf.State {
+		case Follower:
+			rf.FollowerRoutine()
+		}
+	}
+}
+
+func (rf *Raft) FollowerRoutine(){
+
+}
+
+func (rf *Raft) CandidateRoutine(){
+
+}
+
+func (rf *Raft) LeaderRoutine(){
+	
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -158,8 +227,8 @@ func Make(peers []*labrpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.me = me
-
-	// Your initialization code here (3A, 3B).
-
+	rf.CommitIndex = 0
+	rf.LastApplied = 0
+	rf.State = Follower
 	return rf
 }
