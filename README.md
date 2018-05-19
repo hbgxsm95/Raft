@@ -1,4 +1,4 @@
-This repository contains the starter code for project 2 (14-736).
+This repository contains the starter code for project Raft.
 These instructions assume you have set your `GOPATH` to point to the repository's
 root `raft-go/` directory.
 
